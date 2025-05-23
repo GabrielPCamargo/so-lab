@@ -33,7 +33,6 @@ static uint32_t unsaved_laps = 0;
 
 void save_lap_count_to_nvs(uint32_t count);
 
-// Interrupção apenas notifica a task de cálculo
 static void IRAM_ATTR reed_isr_handler(void* arg) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     vTaskNotifyGiveFromISR(calc_task_handle, &xHigherPriorityTaskWoken);
@@ -72,8 +71,6 @@ uint32_t load_lap_count_from_nvs() {
     return count;
 }
 
-
-// Task que calcula a velocidade
 void calc_speed_task(void *arg) {
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -81,22 +78,20 @@ void calc_speed_task(void *arg) {
         int64_t now = esp_timer_get_time();
         int64_t delta_us = now - last_pulse_time;
 
-        if (delta_us > DEBOUNCE_TIME) { // Debounce 100ms
+        if (delta_us > DEBOUNCE_TIME) { // Debounce 10ms
             float delta_sec = delta_us / SEC_IN_US;
             current_speed_kmh = (WHEEL_CIRCUMFERENCE / delta_sec) * 3.6;
             last_pulse_time = now;
             inc_and_save_lap_count();
 
-            // Notifica a task de impressão
             xTaskNotifyGive(print_task_handle);
         }
     }
 }
 
-// Task que imprime a velocidade
 void print_speed_task(void *arg) {
+    char speed_str[16] = "";
     while (1) {
-        char speed_str[16] = "speed: ";
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         printf("Current speed: %.2f km/h\n", current_speed_kmh);
         sprintf(speed_str, "V:%.2f km/h", current_speed_kmh);
@@ -122,7 +117,6 @@ void reed_switch_init() {
 }
 
 void app_main() {
-    printf("Starting ESP32 Bike Speedometer with Tasks...\n");
     last_pulse_time = esp_timer_get_time();
     LCD_init(LCD_ADDR, SDA_PIN, SCL_PIN, LCD_COLS, LCD_ROWS);
 
@@ -135,14 +129,12 @@ void app_main() {
 
     lap_count = load_lap_count_from_nvs();
 
-    // Cria as tasks
     xTaskCreate(calc_speed_task, "CalcSpeedTask", 2048, NULL, 10, &calc_task_handle);
     xTaskCreate(print_speed_task, "PrintSpeedTask", 2048, NULL, 5, &print_task_handle);
 
     reed_switch_init();
     xTaskNotifyGive(print_task_handle);
 
-    // Task para zerar a velocidade após inatividade (opcional)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500));
         if (esp_timer_get_time() - last_pulse_time > TIMEOUT_TO_ZERO) {
