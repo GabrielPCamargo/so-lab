@@ -6,6 +6,8 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "esp_sleep.h"
+
 
 #include "HD44780.h"
 
@@ -16,11 +18,11 @@
 #define LCD_ROWS 2
 
 #define REED_GPIO GPIO_NUM_18
-#define WHEEL_CIRCUMFERENCE 2.1  // metros
-#define LAPS_PER_HUNDRED_METER 47
+#define WHEEL_CIRCUMFERENCE 2.05  // metros
+#define LAPS_PER_TEN_METERS 5
 #define SEC_IN_US 1000000.0
 #define TIMEOUT_TO_ZERO 5000000
-#define DEBOUNCE_TIME 10000
+#define DEBOUNCE_TIME 74000
 
 static TaskHandle_t calc_task_handle = NULL;
 static TaskHandle_t print_task_handle = NULL;
@@ -34,17 +36,36 @@ static uint32_t unsaved_laps = 0;
 void save_lap_count_to_nvs(uint32_t count);
 
 static void IRAM_ATTR reed_isr_handler(void* arg) {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    vTaskNotifyGiveFromISR(calc_task_handle, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    static int64_t last_isr_time = 0;
+    int64_t now = esp_timer_get_time();
+    if (now - last_isr_time > DEBOUNCE_TIME) {  // 74 ms
+        last_isr_time = now;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(calc_task_handle, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
 }
+
+void reed_switch_init() {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << REED_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_POSEDGE
+    };
+    gpio_config(&io_conf);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(REED_GPIO, reed_isr_handler, NULL);
+}
+
 
 
 void inc_and_save_lap_count() {
     lap_count++;
     unsaved_laps++;
 
-    if (unsaved_laps >= LAPS_PER_HUNDRED_METER) {
+    if (unsaved_laps >= LAPS_PER_TEN_METERS) {
         save_lap_count_to_nvs(lap_count);
         unsaved_laps = 0;
     }
@@ -94,7 +115,7 @@ void print_speed_task(void *arg) {
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         printf("Current speed: %.2f km/h\n", current_speed_kmh);
-        sprintf(speed_str, "V:%.2f km/h", current_speed_kmh);
+        sprintf(speed_str, "V:%.2f km/h   ", current_speed_kmh);
         LCD_home();
         LCD_writeStr(speed_str);
         LCD_setCursor(0, 1);
@@ -103,21 +124,11 @@ void print_speed_task(void *arg) {
     }
 }
 
-void reed_switch_init() {
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << REED_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_POSEDGE
-    };
-    gpio_config(&io_conf);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(REED_GPIO, reed_isr_handler, NULL);
-}
-
 void app_main() {
     last_pulse_time = esp_timer_get_time();
+
+    esp_sleep_enable_ext0_wakeup(REED_GPIO, 1);  // Acordar com nível ALTO
+
     LCD_init(LCD_ADDR, SDA_PIN, SCL_PIN, LCD_COLS, LCD_ROWS);
 
     esp_err_t ret = nvs_flash_init();
@@ -142,6 +153,8 @@ void app_main() {
                 current_speed_kmh = 0;
                 xTaskNotifyGive(print_task_handle);
             }
+
+             esp_light_sleep_start();
         }
     }
 }
